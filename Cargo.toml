@@ -15,6 +15,7 @@ toml = "0.9.2"
 colored = "3.0.0"
 atty = "0.2.14"
 strip-ansi-escapes = "0.2.1"
+glob = "0.3"
 
 # Enable LTO and codegen-units=1 for max performance
 [profile.release]

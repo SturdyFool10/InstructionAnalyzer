@@ -12,8 +12,10 @@ pub mod analysis {
 use std::env;
 use std::io::{self};
 
+use glob::glob;
 use serde::Serialize;
 use serde_json;
+use std::collections::HashSet;
 use toml;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,7 +95,7 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    let mut input_files = Vec::new();
+    let mut input_files_set = HashSet::new();
     let mut output_mode = None;
     let mut output_path = None;
     let mut i = 1;
@@ -114,11 +116,27 @@ fn main() -> io::Result<()> {
                 }
             }
             arg => {
-                input_files.push(arg.to_string());
+                // Wildcard expansion and deduplication
+                if arg.contains('*') || arg.contains('?') || arg.contains('[') {
+                    for entry in glob(arg).expect("Failed to read glob pattern") {
+                        if let Ok(path) = entry {
+                            input_files_set.insert(path.display().to_string());
+                        }
+                    }
+                } else {
+                    input_files_set.insert(arg.to_string());
+                }
                 i += 1;
             }
         }
     }
+    let mut input_files: Vec<String> = input_files_set.into_iter().collect();
+    // Sort input files descending by size (largest first)
+    input_files.sort_by(|a, b| {
+        let a_size = std::fs::metadata(a).map(|m| m.len()).unwrap_or(0);
+        let b_size = std::fs::metadata(b).map(|m| m.len()).unwrap_or(0);
+        b_size.cmp(&a_size)
+    });
 
     if args.iter().any(|a| a == "--info") {
         print_instruction_sets();
