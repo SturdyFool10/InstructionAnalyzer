@@ -17,6 +17,7 @@ atty = "0.2.14"
 strip-ansi-escapes = "0.2.1"
 glob = "0.3"
 chrono = "0.4"
+ctrlc = "3.4"
 
 # Enable LTO and codegen-units=1 for max performance
 [profile.release]
