@@ -1,5 +1,6 @@
 pub mod analysis {
     pub mod collect;
+    pub mod executable;
     pub mod patterns;
     pub mod types;
     pub mod utils {
@@ -13,6 +14,7 @@ use std::env;
 use std::io::{self};
 
 use glob::glob;
+use rayon::prelude::*;
 use serde::Serialize;
 use serde_json;
 use std::collections::HashSet;
@@ -29,6 +31,7 @@ fn sanitize_path_for_toml(path: &str) -> String {
 fn analyze_and_output(
     assembly_file_path: &str,
     output_format: OutputFormat,
+    display_path: Option<&str>,
 ) -> std::io::Result<()> {
     use crate::analysis::collect::analyze_and_collect;
     use crate::analysis::utils::format::format_number;
@@ -38,9 +41,11 @@ fn analyze_and_output(
 
     match output_format {
         OutputFormat::Pretty => {
+            // Use the display path (original executable path) if provided, otherwise use the assembly path
+            let display_file_path = display_path.unwrap_or(&output.file);
             println!(
                 "Analyzed {} ({} lines) in {:.2} seconds (avg {} lines/sec)",
-                output.file,
+                display_file_path,
                 format_number(output.total_lines),
                 output.elapsed_secs,
                 format_number(output.avg_lines_per_sec as usize)
@@ -167,13 +172,45 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Separate executable files from assembly files
+    let (executable_files, assembly_files): (Vec<String>, Vec<String>) =
+        input_files.into_iter().partition(|file| {
+            use crate::analysis::executable::ExecutableProcessor;
+            ExecutableProcessor::is_executable(file)
+        });
+
     if let Some(mode) = output_mode {
         let out_path = output_path.expect("Output path required after --json/--toml");
         let mut results = Vec::new();
-        for file_path in &input_files {
-            match analyze_and_collect(file_path) {
-                Ok((output, _, _)) => results.push(output),
-                Err(e) => eprintln!("Error analyzing {}: {}", file_path, e),
+
+        // Process assembly files in parallel using rayon
+        let assembly_results: Vec<AnalysisOutput> = assembly_files
+            .par_iter()
+            .filter_map(|file_path| match analyze_and_collect(file_path) {
+                Ok((output, _, _)) => Some(output),
+                Err(e) => {
+                    eprintln!("Error analyzing assembly file {}: {}", file_path, e);
+                    None
+                }
+            })
+            .collect();
+
+        results.extend(assembly_results);
+
+        // Process executable files using objdump
+        if !executable_files.is_empty() {
+            use crate::analysis::executable::ExecutableProcessor;
+            match ExecutableProcessor::new() {
+                Ok(processor) => {
+                    match processor.analyze_executables(&executable_files) {
+                        Ok(mut exec_results) => results.append(&mut exec_results),
+                        Err(e) => eprintln!("Error processing executables: {}", e),
+                    }
+
+                    // Clean up temp files
+                    let _ = processor.cleanup();
+                }
+                Err(e) => eprintln!("Failed to initialize executable processor: {}", e),
             }
         }
         if mode == "json" {
@@ -204,10 +241,46 @@ fn main() -> io::Result<()> {
             std::fs::write(&out_path, toml).expect("Failed to write TOML output");
         }
     } else {
-        for file_path in &input_files {
-            match analyze_and_output(file_path, OutputFormat::Pretty) {
+        // Process assembly files in parallel using rayon
+        assembly_files.par_iter().for_each(|file_path| {
+            match analyze_and_output(file_path, OutputFormat::Pretty, None) {
                 Ok(()) => {}
-                Err(e) => eprintln!("Error analyzing {}: {}", file_path, e),
+                Err(e) => eprintln!("Error analyzing assembly file {}: {}", file_path, e),
+            }
+        });
+
+        // Process executable files
+        if !executable_files.is_empty() {
+            use crate::analysis::executable::ExecutableProcessor;
+            match ExecutableProcessor::new() {
+                Ok(processor) => {
+                    // Process executables and get paths to assembly files
+                    match processor.process_executables_parallel(&executable_files) {
+                        Ok(processed_files) => {
+                            // Process the assembly files in parallel using rayon
+                            processed_files
+                                .par_iter()
+                                .for_each(|(original_path, asm_path)| {
+                                    match analyze_and_output(
+                                        &asm_path,
+                                        OutputFormat::Pretty,
+                                        Some(original_path),
+                                    ) {
+                                        Ok(()) => {}
+                                        Err(e) => eprintln!(
+                                            "Error analyzing executable {}: {}",
+                                            original_path, e
+                                        ),
+                                    }
+                                });
+                        }
+                        Err(e) => eprintln!("Error processing executables: {}", e),
+                    }
+
+                    // Clean up temp files
+                    let _ = processor.cleanup();
+                }
+                Err(e) => eprintln!("Failed to initialize executable processor: {}", e),
             }
         }
     }
@@ -235,9 +308,13 @@ fn print_usage(program: &str) {
     println!("{}", "Options:".bright_magenta());
     println!("  {}", "<assembly_file>...".bright_yellow());
     println!(
-        "      One or more assembly files to analyze. You can specify multiple files in a single call.",
+        "      One or more assembly files or executables to analyze. You can specify multiple files in a single call.",
     );
     println!("      Wildcards are supported (e.g., *.s, file?.asm, bin/[a-z]*.obj)",);
+    println!(
+        "      Executables (EXE, DLL, SO, etc.) will be automatically disassembled using objdump.",
+    );
+    println!("      Set OBJDUMP_LOCATION environment variable to specify objdump's path.",);
     println!(
         "  {}         Print this help message",
         "-h, --help, -help, /?, /help".bright_yellow()
