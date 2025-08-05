@@ -117,11 +117,27 @@ fn main() -> io::Result<()> {
             }
             arg => {
                 // Wildcard expansion and deduplication
-                if arg.contains('*') || arg.contains('?') || arg.contains('[') {
-                    for entry in glob(arg).expect("Failed to read glob pattern") {
-                        if let Ok(path) = entry {
-                            input_files_set.insert(path.display().to_string());
+                if arg.contains('*') || arg.contains('?') || arg.contains('[') || arg.contains('{')
+                {
+                    match glob(arg) {
+                        Ok(paths) => {
+                            let mut found_any = false;
+                            for entry in paths {
+                                match entry {
+                                    Ok(path) => {
+                                        input_files_set.insert(path.display().to_string());
+                                        found_any = true;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error with path from pattern {}: {}", arg, e)
+                                    }
+                                }
+                            }
+                            if !found_any {
+                                eprintln!("Warning: Pattern '{}' didn't match any files", arg);
+                            }
                         }
+                        Err(e) => eprintln!("Invalid glob pattern '{}': {}", arg, e),
                     }
                 } else {
                     input_files_set.insert(arg.to_string());
@@ -145,7 +161,7 @@ fn main() -> io::Result<()> {
 
     if input_files.is_empty() {
         println!(
-            "Usage: instruction_extension_analyzer [file1 file2 ...] [--json output.json | --toml output.toml]"
+            "Usage: instruction_extension_analyzer [file1 file2 ... | wildcards] [--json output.json | --toml output.toml]"
         );
         print_instruction_sets();
         return Ok(());
@@ -221,6 +237,7 @@ fn print_usage(program: &str) {
     println!(
         "      One or more assembly files to analyze. You can specify multiple files in a single call.",
     );
+    println!("      Wildcards are supported (e.g., *.s, file?.asm, bin/[a-z]*.obj)",);
     println!(
         "  {}         Print this help message",
         "-h, --help, -help, /?, /help".bright_yellow()
@@ -248,6 +265,12 @@ fn print_usage(program: &str) {
         "  {} {} --toml results.toml",
         exe,
         "my_binary.s".bright_green()
+    );
+    println!(
+        "  {} {} {}",
+        exe,
+        "*.s".bright_green(),
+        "bin/*.asm".bright_green()
     );
     println!("  {} {} --info", exe, "my_binary.s".bright_green());
     println!();
